@@ -85,7 +85,7 @@ run in Python, not in SQL, to avoid dialect timezone surprises.
 
 | File | Contents |
 | --- | --- |
-| `app/core/security.py` | `hash_password`, `verify_password`, `create_access_token`, `decode_access_token`, `new_refresh_token`, `hash_refresh_token`, `utcnow`, `ensure_utc`, `AccessTokenPayload` |
+| `app/core/security.py` | `hash_password`, `verify_password`, `verify_password_or_dummy`, `create_access_token(..., expires_delta=None)`, `decode_access_token -> int \| None`, `new_refresh_token`, `hash_refresh_token`, `utcnow`, `ensure_utc` |
 | `app/db/models/user.py` | `User` |
 | `app/db/models/user_session.py` | `UserSession` |
 | `app/schemas/user.py` | `UserCreate` (request), `UserRead` (response) |
