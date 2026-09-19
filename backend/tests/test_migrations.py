@@ -54,32 +54,67 @@ def test_upgrade_head_creates_expected_schema(migrated_db: tuple[str, Path]) -> 
 
     tables = _table_names(db_path)
 
-    assert {"alembic_version", "items"} <= tables
+    assert {"alembic_version", "users", "sessions"} <= tables
 
 
-def test_items_table_has_unique_index_on_name(migrated_db: tuple[str, Path]) -> None:
+def test_items_table_is_gone(migrated_db: tuple[str, Path]) -> None:
+    """The Item slice is deleted from both the models and the schema."""
+
+    _, db_path = migrated_db
+
+    assert "items" not in _table_names(db_path)
+
+
+def test_users_table_has_a_unique_index_on_email(migrated_db: tuple[str, Path]) -> None:
     _, db_path = migrated_db
 
     with sqlite3.connect(db_path) as connection:
-        # (seq, name, unique, origin, partial) -> truthy index[2] means UNIQUE.
-        indexes = {row[1]: row[2] for row in connection.execute("PRAGMA index_list('items')")}
+        indexes = {row[1]: row[2] for row in connection.execute("PRAGMA index_list('users')")}
         indexed_columns = {
-            row[2] for row in connection.execute("PRAGMA index_info('ix_items_name')")
+            row[2] for row in connection.execute("PRAGMA index_info('ix_users_email')")
         }
-        columns = {row[1] for row in connection.execute("PRAGMA table_info('items')")}
+        columns = {row[1] for row in connection.execute("PRAGMA table_info('users')")}
 
-    assert indexes.get("ix_items_name") == 1, "ix_items_name must be a UNIQUE index"
-    assert indexed_columns == {"name"}
-    assert columns == {"id", "name", "description", "created_at", "updated_at"}
+    assert indexes.get("ix_users_email") == 1, "ix_users_email must be a UNIQUE index"
+    assert indexed_columns == {"email"}
+    assert columns == {"id", "email", "hashed_password", "created_at", "updated_at"}
 
 
-def test_downgrade_base_removes_items_table(migrated_db: tuple[str, Path]) -> None:
+def test_sessions_table_has_a_unique_token_digest_and_cascades_from_users(
+    migrated_db: tuple[str, Path],
+) -> None:
+    _, db_path = migrated_db
+
+    with sqlite3.connect(db_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info('sessions')")}
+        indexes = {row[1]: row[2] for row in connection.execute("PRAGMA index_list('sessions')")}
+        # PRAGMA foreign_key_list -> (id, seq, table, from, to, on_update, on_delete, match)
+        foreign_keys = {
+            (row[2], row[3], row[4], row[6])
+            for row in connection.execute("PRAGMA foreign_key_list('sessions')")
+        }
+
+    assert columns == {
+        "id",
+        "user_id",
+        "token_hash",
+        "expires_at",
+        "revoked_at",
+        "created_at",
+        "updated_at",
+    }
+    assert indexes.get("ix_sessions_token_hash") == 1, "ix_sessions_token_hash must be UNIQUE"
+    assert "ix_sessions_user_id" in indexes
+    assert foreign_keys == {("users", "user_id", "id", "CASCADE")}
+
+
+def test_downgrade_base_is_reversible(migrated_db: tuple[str, Path]) -> None:
     database_url, db_path = migrated_db
 
     result = _run_alembic("downgrade", "base", database_url=database_url)
 
     assert result.returncode == 0, f"alembic downgrade base failed:\n{result.stderr}"
-    assert "items" not in _table_names(db_path)
+    assert not {"items", "users", "sessions"} & _table_names(db_path)
 
 
 def test_schema_matches_models(migrated_db: tuple[str, Path]) -> None:

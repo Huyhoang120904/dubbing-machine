@@ -1,6 +1,5 @@
 """Pydantic schemas: the API's request and response contracts."""
 
-from app.schemas.common import ErrorDetail, Page
-from app.schemas.item import ItemCreate, ItemRead, ItemUpdate
+from app.schemas.common import UnifiedResponse, unified
 
-__all__ = ["ErrorDetail", "ItemCreate", "ItemRead", "ItemUpdate", "Page"]
+__all__ = ["UnifiedResponse", "unified"]

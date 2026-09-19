@@ -173,18 +173,9 @@ the engine is async.
 | GET | `/health` | Unversioned liveness probe |
 | GET | `/api/v1/health` | Versioned liveness |
 | GET | `/api/v1/health/db` | Readiness (database round-trip) |
-| GET | `/api/v1/items?skip=&limit=` | Paginated list |
-| POST | `/api/v1/items` | Create (`409` on duplicate name) |
-| GET | `/api/v1/items/{id}` | Fetch (`404` if missing) |
-| PATCH | `/api/v1/items/{id}` | Partial update |
-| DELETE | `/api/v1/items/{id}` | Delete (`204`, no body) |
 
 ```bash
-curl -X POST localhost:8000/api/v1/items \
-  -H 'content-type: application/json' \
-  -d '{"name":"Widget","description":"A shiny widget"}'
-
-curl 'localhost:8000/api/v1/items?limit=10'
+curl localhost:8000/api/v1/health
 ```
 
 Request flow: `endpoint → service → crud → session`. Endpoints hold no SQL and no
@@ -210,7 +201,6 @@ uv run pytest
 | --- | --- |
 | `No virtualenv found. Run 'make install' first.` | Run `make install`. |
 | `Address already in use` | Something holds the port: `make status`, then `make stop` (or `make dev PORT=8001`). |
-| `no such table: items` | Database not migrated: `make migrate` (or `make db-reset`). |
 | `database is locked` | A leftover process holds a write lock: `pkill -f 'app.main:app'`. WAL mode and a 5s `busy_timeout` are already configured. |
 | `make stop` reports "Stale pidfile" | Harmless — a previous run died without cleanup; the pidfile is removed for you. |
 | Changes to `.env` seem ignored | It is read at startup: `make restart`. |
