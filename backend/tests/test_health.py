@@ -39,4 +39,14 @@ async def test_openapi_schema_is_served(client: AsyncClient) -> None:
     response = await client.get("/api/v1/openapi.json")
 
     assert response.status_code == 200
-    assert "/api/v1/items" in response.json()["paths"]
+    assert "/api/v1/auth/login" in response.json()["paths"]
+
+
+async def test_unknown_path_returns_an_enveloped_404(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/does-not-exist")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body) == {"status_code", "message", "data"}
+    assert body["status_code"] == 404
+    assert body["data"] is None

@@ -94,8 +94,8 @@ Either way, once it is up:
 * API docs (Swagger UI): <http://127.0.0.1:8000/docs>
 * Health probe: <http://127.0.0.1:8000/health>
 
-> Run against a migrated database (`make migrate`), otherwise `/api/v1/health/db`
-> and the `/api/v1/items` endpoints fail with "no such table".
+> Run against a migrated database (`make migrate`), otherwise `/api/v1/health/db` and
+> the `/api/v1/auth/*` endpoints fail with "no such table: users".
 
 ## Stop
 
@@ -158,6 +158,9 @@ Settings live in `backend/app/core/config.py` and are read from the environment;
 | `SQL_ECHO` | `false` | Log every SQL statement. |
 | `CORS_ORIGINS` | `[]` | JSON array, e.g. `["http://localhost:3000"]`. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. |
+| `JWT_SECRET_KEY` | `change-me-in-production` | Startup fails if the default is still set while `APP_ENV` is `staging`/`production`. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access-token lifetime. |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `30` | Refresh-session lifetime. |
 
 A sync `DATABASE_URL` (e.g. `sqlite:///...`) is rejected at startup on purpose —
 the engine is async.
@@ -170,23 +173,38 @@ the engine is async.
 | GET | `/health` | Unversioned liveness probe |
 | GET | `/api/v1/health` | Versioned liveness |
 | GET | `/api/v1/health/db` | Readiness (database round-trip) |
-| GET | `/api/v1/items?skip=&limit=` | Paginated list |
-| POST | `/api/v1/items` | Create (`409` on duplicate name) |
-| GET | `/api/v1/items/{id}` | Fetch (`404` if missing) |
-| PATCH | `/api/v1/items/{id}` | Partial update |
-| DELETE | `/api/v1/items/{id}` | Delete (`204`, no body) |
+| POST | `/api/v1/auth/register` | Create an account (`409` on duplicate email) |
+| POST | `/api/v1/auth/login` | Exchange email + password for an access/refresh token pair |
+| POST | `/api/v1/auth/refresh` | Rotate a refresh token (the old one stops working) |
+| POST | `/api/v1/auth/logout` | Revoke a refresh token (`200` with `data: null`) |
+| GET | `/api/v1/auth/me` | The authenticated user |
 
 ```bash
-curl -X POST localhost:8000/api/v1/items \
+# Register, then log in
+curl -X POST localhost:8000/api/v1/auth/register \
   -H 'content-type: application/json' \
-  -d '{"name":"Widget","description":"A shiny widget"}'
+  -d '{"email":"you@example.com","password":"supersecret"}'
 
-curl 'localhost:8000/api/v1/items?limit=10'
+curl -X POST localhost:8000/api/v1/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@example.com","password":"supersecret"}'
+# -> {"status_code":200,"message":"Login successful","data":{"access_token":"...",
+#     "refresh_token":"...","token_type":"bearer","expires_in":900,"refresh_expires_in":2592000}}
+
+curl localhost:8000/api/v1/auth/me -H 'Authorization: Bearer <access_token>'
+
+# Errors look the same
+# -> {"status_code":401,"message":"Invalid email or password","data":null}
 ```
 
-Request flow: `endpoint → service → crud → session`. Endpoints hold no SQL and no
-business rules; services raise `ItemNotFoundError` / `ItemConflictError`, which
-endpoints translate into `404` / `409`.
+Request flow: `routes → services → repositories → session`. Routes hold no SQL and no
+business rules; `AuthService` raises `EmailAlreadyRegisteredError` /
+`InvalidCredentialsError` / `InvalidSessionError`, which routes translate into
+`409` / `401`. Repositories `flush()`, the service `commit()`s.
+
+The auth routes answer with a response envelope (`status_code`, `message`, `data`), and
+error responses use it everywhere. `/`, `/health`, `/api/v1/health` and
+`/api/v1/health/db` stay bare for probes.
 
 ## Doing it without make
 
@@ -205,9 +223,10 @@ uv run pytest
 
 | Symptom | Fix |
 | --- | --- |
+| `no such table: users` | Database not migrated: `make migrate` (or `make db-reset`). |
+| `401` on every authenticated call | The access token lives 15 minutes: `POST /api/v1/auth/refresh`. If refresh also fails, `JWT_SECRET_KEY` changed since the token was issued — log in again. |
 | `No virtualenv found. Run 'make install' first.` | Run `make install`. |
 | `Address already in use` | Something holds the port: `make status`, then `make stop` (or `make dev PORT=8001`). |
-| `no such table: items` | Database not migrated: `make migrate` (or `make db-reset`). |
 | `database is locked` | A leftover process holds a write lock: `pkill -f 'app.main:app'`. WAL mode and a 5s `busy_timeout` are already configured. |
 | `make stop` reports "Stale pidfile" | Harmless — a previous run died without cleanup; the pidfile is removed for you. |
 | Changes to `.env` seem ignored | It is read at startup: `make restart`. |
