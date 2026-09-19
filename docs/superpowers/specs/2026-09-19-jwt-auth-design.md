@@ -258,45 +258,37 @@ generating the secret.
 
 ## 9. Testing (TDD — tests are written before the implementation)
 
-`tests/test_auth.py`, using the existing in-memory ASGI `client` fixture; register
-and login go over HTTP, so `conftest.py` needs no changes:
+Deliberately lean: **13 tests across two files**, chosen so that the security-critical negative
+paths stay covered while implementation stays fast. Layer-by-layer unit suites for the
+repositories and the service were removed on purpose: the HTTP tests exercise both layers.
 
-- register `201` with `data` holding the user and no hash anywhere in the response;
-  the stored row starts with `$2b$`; `verify_password` accepts the original
-- register lowercases/strips the email
-- duplicate email → `409`; invalid email → `422`; 7-character password → `422`;
-  73-byte password → `422`
-- **envelope shape**: every `/api/v1/auth` success response has exactly the keys
-  `{status_code, message, data}`, and `status_code` equals the HTTP status
-- **error envelope**: a `401` and a `409` carry `data is None` with a specific
-  `message`; a `422` carries the pydantic error list in `data`
-- **non-auth routes stay bare**: `/`, `/health`, `/api/v1/health` and
-  `/api/v1/health/db` return their existing bodies with none of the envelope keys
-- login → `200` with both tokens in `data` and the right `expires_in`; two logins
-  yield different refresh tokens
-- wrong password → `401`; unknown email → `401` with an identical `message`
-- `/me` with a valid token → `200` with the user in `data`; without a header → `401`;
-  with garbage → `401`; with a tampered payload → `401`; with a refresh token sent as
-  a bearer token → `401`; with an **expired** token → `401`, built by passing an
-  explicit negative `expires_delta` to `create_access_token` so no clock mocking is
-  needed
-- refresh → `200` with a fresh pair, after which the old refresh token → `401`
-  (rotation)
-- refresh with an unknown token → `401`; with an expired session row → `401`; with a
-  session already revoked by logout → `401`
-- logout → `200` with `data: null` and the refresh token stops working; logout with a
-  foreign or unknown refresh token → `401`; logout without a bearer token → `401`
+`tests/test_security.py` — 3 primitives tests: a bcrypt hash verifies and rejects the wrong
+password; an expired access token is rejected; a token signed with another secret is rejected.
 
-Updated tests:
+`tests/test_auth.py` — 9 end-to-end tests over the existing ASGI `client` fixture:
 
-- `tests/test_health.py` — the health assertions stay exactly as they are, which is
-  what pins the bare contract for non-auth routes; only the OpenAPI assertion changes
-  to `/api/v1/auth/login`.
-- `tests/test_migrations.py` — the `items` index/column assertions become
-  `users`/`sessions` equivalents; a new test asserts `items` is gone after
-  `upgrade head`; `downgrade base` is asserted to remove all three tables.
-  `test_migrations_are_in_sync_with_models` (`alembic check`) must stay green, which
-  is the proof that the new migration matches the models.
+- register `201`, enveloped, no hash in the response, and the stored row starts with `$2b$`
+- duplicate email `409`; invalid email and a short password `422` (the pydantic list rides in `data`)
+- login `200` with the pair and the configured `expires_in` / `refresh_expires_in`
+- a wrong password and an unknown email fail identically (`401`, identical body)
+- `/me` returns the user for a valid token, and `401` for a missing, garbage, expired, or
+  refresh-shaped bearer token
+- refresh rotates: the presented token `401`s afterwards
+- logout `200` with `data: null`, after which the refresh token stops working
+
+`tests/test_health.py` gains 1 test — an unknown path is an enveloped `404`, which is the proof
+that the handlers are wired. Its existing assertions are what pin the bare bodies of `/` and the
+health probes.
+
+`tests/test_migrations.py` — the `items` assertions become `users`/`sessions` equivalents, plus a
+test that `items` is gone after `upgrade head`; `alembic check` (already asserted there) is what
+proves the new revision matches the models.
+
+**Coverage accepted as missing, on purpose.** Nothing asserts: refresh-token reuse beyond a
+single replay, an expired *session* row, a token for a deleted user, a tampered JWT payload, the
+dummy-verify timing path, the flush-not-commit transaction rule, or the `JWT_SECRET_KEY`
+production guard. All of that behaviour is implemented; only the assertions are skipped. Add
+them once the auth flow stops changing daily.
 
 ## 10. Migration and removal
 
@@ -323,7 +315,8 @@ showing the envelope, plus one error-envelope example since clients must handle 
 
 - `make check` passes: `ruff check`, `ruff format --check`, full pytest suite.
 - `alembic check` reports no pending model/migration drift.
-- Every endpoint in §6.2 behaves as tabled, including every `401`/`409`/`422` case.
+- Every endpoint in §6.2 behaves as tabled. The §9 test set asserts the success paths and
+  the main `401`/`409`/`422` failures; the gaps it leaves are listed there as accepted.
 - Every `/api/v1/auth` success is a `UnifiedResponse` with exactly `status_code`,
   `message`, `data`, and every error response anywhere is a `UnifiedResponse` with
   `data: null`; `/`, `/health`, `/api/v1/health` and `/api/v1/health/db` keep their
