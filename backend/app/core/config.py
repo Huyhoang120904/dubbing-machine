@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_JWT_SECRET = "change-me-in-production"
 
 
 class Settings(BaseSettings):
@@ -38,6 +40,11 @@ class Settings(BaseSettings):
     # --- HTTP ------------------------------------------------------------
     cors_origins: list[str] = Field(default_factory=list)
 
+    # --- Auth ------------------------------------------------------------
+    jwt_secret_key: str = DEFAULT_JWT_SECRET
+    access_token_expire_minutes: int = Field(default=15, gt=0)
+    refresh_token_expire_days: int = Field(default=30, gt=0)
+
     # --- Logging ---------------------------------------------------------
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
@@ -50,6 +57,15 @@ class Settings(BaseSettings):
                 "SQLite URLs must use the async driver, e.g. 'sqlite+aiosqlite:///./dubbing.db'",
             )
         return value
+
+    @model_validator(mode="after")
+    def _reject_placeholder_secret_when_deployed(self) -> Self:
+        """The built-in default must never reach staging or production."""
+        if self.app_env in {"staging", "production"} and self.jwt_secret_key == DEFAULT_JWT_SECRET:
+            raise ValueError(
+                "JWT_SECRET_KEY must be overridden when APP_ENV is staging or production"
+            )
+        return self
 
     @property
     def is_sqlite(self) -> bool:

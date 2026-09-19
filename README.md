@@ -158,6 +158,9 @@ Settings live in `backend/app/core/config.py` and are read from the environment;
 | `SQL_ECHO` | `false` | Log every SQL statement. |
 | `CORS_ORIGINS` | `[]` | JSON array, e.g. `["http://localhost:3000"]`. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. |
+| `JWT_SECRET_KEY` | `change-me-in-production` | Startup fails if the default is still set while `APP_ENV` is `staging`/`production`. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access-token lifetime. |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `30` | Refresh-session lifetime. |
 
 A sync `DATABASE_URL` (e.g. `sqlite:///...`) is rejected at startup on purpose —
 the engine is async.
