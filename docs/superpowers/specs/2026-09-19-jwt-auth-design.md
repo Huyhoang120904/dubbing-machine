@@ -12,6 +12,9 @@ JWT access tokens, and refresh tokens persisted as revocable rows in a `sessions
 table. The `Item` CRUD slice is deleted in the same change so the auth flow becomes
 the codebase's reference example of the layering.
 
+Every `/api/v1` response — success and error alike — is wrapped in one
+`UnifiedResponse` envelope carrying `status_code`, `message` and `data`.
+
 ## 2. Non-goals
 
 - No roles, permissions, `is_active`, or `is_superuser`.
@@ -86,10 +89,12 @@ run in Python, not in SQL, to avoid dialect timezone surprises.
 | `app/db/models/user_session.py` | `UserSession` |
 | `app/schemas/user.py` | `UserCreate` (request), `UserRead` (response) |
 | `app/schemas/auth.py` | `LoginRequest`, `RefreshRequest`, `LogoutRequest`, `TokenPair` |
+| `app/schemas/common.py` | `UnifiedResponse[T]` envelope + the `unified()` builder |
 | `app/repositories/user.py` | `UserRepository` — `get_by_email` |
 | `app/repositories/session.py` | `UserSessionRepository` — `get_by_token_hash`, `revoke`, `create_for_user` |
 | `app/services/auth.py` | `AuthService(db, users: UserRepository, sessions: UserSessionRepository)` + `EmailAlreadyRegisteredError`, `InvalidCredentialsError`, `InvalidSessionError` |
 | `app/api/v1/routes/auth.py` | the five endpoints |
+| `app/api/errors.py` | `HTTPException` + `RequestValidationError` handlers emitting the envelope |
 | `tests/test_auth.py` | see §9 |
 
 **Locked interfaces.** `UserRepository` exposes `get(id)`, `get_by_email(email)`,
@@ -115,10 +120,13 @@ login, never in a repository or a route.
 - `app/api/deps.py` — drop `ItemServiceDep`/`PaginationDep`; add `AuthServiceDep`,
   `CurrentUserDep` (`HTTPBearer(auto_error=False)` → `get_current_user`).
 - `app/api/v1/router.py` — mount `auth.router` in place of the removed
-  `items.router`. `app/main.py` needs no change.
+  `items.router`.
+- `app/main.py` — register both exception handlers from `app/api/errors.py` inside
+  `create_app`, so `/api/v1` errors are enveloped while the unversioned `/` and
+  `/health` probes stay bare.
 - `app/db/models/__init__.py`, `app/repositories/__init__.py`, `app/schemas/__init__.py`
   — re-export lists.
-- `app/core/config.py`, `backend/.env.example` — §6.
+- `app/core/config.py`, `backend/.env.example` — §7.
 - `tests/test_health.py`, `tests/test_migrations.py` — §9.
 - `README.md` (root, canonical) and `backend/README.md` — API table, layering
   paragraph, config table, troubleshooting row, curl examples.
@@ -127,19 +135,62 @@ login, never in a repository or a route.
 
 `app/db/models/item.py`, `app/crud/item.py`, `app/services/item.py`,
 `app/schemas/item.py`, `app/api/v1/endpoints/items.py`, `tests/test_items.py`, and
-`app/schemas/common.py` (both `Page` and `ErrorDetail` become unreachable once the
-Item routes go; `Page` existed only for paginated item listing and `ErrorDetail`
-was never referenced).
+from `app/schemas/common.py` the `Page` and `ErrorDetail` models — both become
+unreachable once the Item routes go and errors are enveloped. The file itself
+survives as the envelope's home, with its `__init__.py` re-exports updated.
 
-## 6. API contract — `/api/v1/auth`, tag `auth`
+## 6. Responses and API contract
 
-| Method | Path | Request | Success | Failures |
+### 6.1 `UnifiedResponse` — the envelope for every `/api/v1` response
+
+`app/schemas/common.py` defines one generic model that wraps success **and** error
+bodies:
+
+```python
+class UnifiedResponse(BaseModel, Generic[T]):
+    status_code: int = Field(description="Mirrors the HTTP status code")
+    message: str = Field(description="Human-readable result", examples=["Login successful"])
+    data: T | None = None
+```
+
+The HTTP status stays authoritative — proxies, `curl -f`, and monitoring keep working
+— and `status_code` mirrors it in the body so a client only ever parses one shape.
+Routes declare `response_model=UnifiedResponse[UserRead]` and build the body with a
+small `unified(data, *, status_code, message)` helper.
+
+Success messages: `register` → "User registered", `login` → "Login successful",
+`refresh` → "Token refreshed", `logout` → "Logged out", `me` → "OK".
+
+Errors are enveloped by two handlers in `app/api/errors.py`, registered on the app
+inside `create_app`: one for `HTTPException`, one for `RequestValidationError`. Both
+keep the HTTP status and set `data=None`, so a bad password answers
+`{"status_code": 401, "message": "Invalid email or password", "data": null}` rather
+than FastAPI's bare `{"detail": ...}`.
+
+A `422` still has to say *which* field failed, so the pydantic error list travels in
+`data`: `{"status_code": 422, "message": "Validation error", "data": [{"loc": [...],
+"msg": ..., "type": ...}, ...]}`. `data` is therefore typed per response, not always
+an object — that is the cost of a three-key envelope.
+
+Each route also declares its error models (`responses={401: {"model":
+UnifiedResponse[None]}}` and so on) so the OpenAPI schema matches what the handlers
+actually emit.
+
+`/` and the unversioned `/health` are deliberately **not** enveloped: probes and
+`make status` consume them and should not have to unwrap anything.
+
+### 6.2 `/api/v1/auth` endpoints (tag `auth`)
+
+| Method | Path | Request | Success (`data`) | Failures |
 | --- | --- | --- | --- | --- |
-| POST | `/register` | `{email, password}` | `201 UserRead` (no tokens) | `409` email taken · `422` invalid email / password length |
-| POST | `/login` | `{email, password}` | `200 TokenPair` | `401` invalid credentials |
-| POST | `/refresh` | `{refresh_token}` | `200 TokenPair` (rotation) | `401` unknown / expired / revoked |
-| POST | `/logout` | `{refresh_token}` + `Authorization: Bearer` | `204`, empty body | `401` bad access token · `401` token not this user's live session |
-| GET | `/me` | `Authorization: Bearer` | `200 UserRead` | `401` |
+| POST | `/register` | `{email, password}` | `201` `data=UserRead` (no tokens) | `409` email taken · `422` invalid email / password length |
+| POST | `/login` | `{email, password}` | `200` `data=TokenPair` | `401` invalid credentials |
+| POST | `/refresh` | `{refresh_token}` | `200` `data=TokenPair` (rotation) | `401` unknown / expired / revoked |
+| POST | `/logout` | `{refresh_token}` + `Authorization: Bearer` | `200` `data=null` | `401` bad access token · `401` token not this user's live session |
+| GET | `/me` | `Authorization: Bearer` | `200` `data=UserRead` | `401` |
+
+`logout` answers `200` with `data: null` instead of `204`: a `204` cannot carry a body,
+and the point of the envelope is that no response is a special case.
 
 `UserRead` = `{id, email, created_at, updated_at}` — the hash is never serialised.
 `TokenPair` = `{access_token, refresh_token, token_type: "bearer", expires_in,
@@ -203,29 +254,36 @@ generating the secret.
 `tests/test_auth.py`, using the existing in-memory ASGI `client` fixture; register
 and login go over HTTP, so `conftest.py` needs no changes:
 
-- register `201`; response contains no hash; the stored row starts with `$2b$`, and
-  `verify_password` accepts the original while the plaintext appears nowhere
+- register `201` with `data` holding the user and no hash anywhere in the response;
+  the stored row starts with `$2b$`; `verify_password` accepts the original
 - register lowercases/strips the email
 - duplicate email → `409`; invalid email → `422`; 7-character password → `422`;
   73-byte password → `422`
-- login → `200` with both tokens and the right `expires_in`; two logins yield
-  different refresh tokens
-- wrong password → `401`; unknown email → `401` with an identical `detail`
-- `/me` with a valid token → `200` and the right email; without a header → `401`;
-  with garbage → `401`; with a tampered payload → `401`; with a refresh token sent
-  as a bearer token → `401`; with an **expired** token → `401`, built by passing an
+- **envelope shape**: every `/api/v1` response, success and error alike, has exactly
+  the keys `{status_code, message, data}`, and `status_code` equals the HTTP status
+- **error envelope**: a `401` and a `409` carry `data is None` with a specific
+  `message`; a `422` carries the pydantic error list in `data`
+- **unversioned probes stay bare**: `/` and `/health` have none of the envelope keys
+- login → `200` with both tokens in `data` and the right `expires_in`; two logins
+  yield different refresh tokens
+- wrong password → `401`; unknown email → `401` with an identical `message`
+- `/me` with a valid token → `200` with the user in `data`; without a header → `401`;
+  with garbage → `401`; with a tampered payload → `401`; with a refresh token sent as
+  a bearer token → `401`; with an **expired** token → `401`, built by passing an
   explicit negative `expires_delta` to `create_access_token` so no clock mocking is
   needed
 - refresh → `200` with a fresh pair, after which the old refresh token → `401`
   (rotation)
-- refresh with an unknown token → `401`; with an expired session row → `401`;
-  with a session already revoked by logout → `401`
-- logout → `204` and the refresh token stops working; logout with a foreign or
-  unknown refresh token → `401`; logout without a bearer token → `401`
+- refresh with an unknown token → `401`; with an expired session row → `401`; with a
+  session already revoked by logout → `401`
+- logout → `200` with `data: null` and the refresh token stops working; logout with a
+  foreign or unknown refresh token → `401`; logout without a bearer token → `401`
 
 Updated tests:
 
-- `tests/test_health.py` — the OpenAPI assertion becomes `/api/v1/auth/login`.
+- `tests/test_health.py` — the `/api/v1/health` and `/api/v1/health/db` assertions
+  unwrap the envelope; `/health` stays an exact bare `{"status": "ok"}`; the OpenAPI
+  assertion becomes `/api/v1/auth/login`.
 - `tests/test_migrations.py` — the `items` index/column assertions become
   `users`/`sessions` equivalents; a new test asserts `items` is gone after
   `upgrade head`; `downgrade base` is asserted to remove all three tables.
@@ -249,14 +307,17 @@ Documentation updated in the same change (root `README.md` is canonical):
 the API table, the `endpoint → service → crud → session` request-flow paragraph
 becomes `routes → services → repositories → session`, the configuration table gains
 the three new variables, the `no such table: items` troubleshooting row is replaced
-with the auth equivalents, and the Item curl examples become register/login examples.
+with the auth equivalents, and the Item curl examples become register/login examples
+showing the envelope, plus one error-envelope example since clients must handle it.
 `backend/README.md` only needs the new dependency/secret line if it mentions them.
 
 ## 11. Acceptance criteria
 
 - `make check` passes: `ruff check`, `ruff format --check`, full pytest suite.
 - `alembic check` reports no pending model/migration drift.
-- Every endpoint in §6 behaves as tabled, including every `401`/`409`/`422` case.
+- Every endpoint in §6.2 behaves as tabled, including every `401`/`409`/`422` case.
+- Every `/api/v1` response, success or error, is a `UnifiedResponse` carrying exactly
+  `status_code`, `message` and `data`; `/` and `/health` remain bare.
 - No `Item`, `items`, or `crud` reference survives in `app/`, `tests/`, or the
   READMEs, apart from the migration that drops the `items` table.
 - The migration is reversible: `downgrade base` runs clean on a fresh database.
@@ -269,6 +330,11 @@ with the auth equivalents, and the Item curl examples become register/login exam
   deleted.
 - **Trimming `get_multi`/`count`/`update`/`remove` from `BaseRepository`.** Renaming
   the base is in scope; deleting its now-unused methods is separate cleanup.
+- **A pagination envelope.** `Page` is deleted; a future list endpoint returns its
+  `{items, total, limit, offset}` shape inside `UnifiedResponse.data`, so no second
+  envelope model is needed.
+- **Localising `message` / a message catalogue.** One literal English string per route
+  is enough until there is a second locale.
 - **Cookie transport and CSRF protection, roles/permissions, email verification,
   password reset, and `python-multipart`-style OAuth2 form login.** Not requested;
   each adds surface without serving the goal.
