@@ -12,8 +12,9 @@ JWT access tokens, and refresh tokens persisted as revocable rows in a `sessions
 table. The `Item` CRUD slice is deleted in the same change so the auth flow becomes
 the codebase's reference example of the layering.
 
-Every `/api/v1` response — success and error alike — is wrapped in one
-`UnifiedResponse` envelope carrying `status_code`, `message` and `data`.
+The auth routes answer with a single `UnifiedResponse` envelope carrying
+`status_code`, `message` and `data`, and so does every error response, because the
+exception handlers are app-wide.
 
 ## 2. Non-goals
 
@@ -122,8 +123,8 @@ login, never in a repository or a route.
 - `app/api/v1/router.py` — mount `auth.router` in place of the removed
   `items.router`.
 - `app/main.py` — register both exception handlers from `app/api/errors.py` inside
-  `create_app`, so `/api/v1` errors are enveloped while the unversioned `/` and
-  `/health` probes stay bare.
+  `create_app`. Handlers are app-level in FastAPI, so every error response is
+  enveloped while success bodies stay bare outside the auth routes.
 - `app/db/models/__init__.py`, `app/repositories/__init__.py`, `app/schemas/__init__.py`
   — re-export lists.
 - `app/core/config.py`, `backend/.env.example` — §7.
@@ -141,7 +142,7 @@ survives as the envelope's home, with its `__init__.py` re-exports updated.
 
 ## 6. Responses and API contract
 
-### 6.1 `UnifiedResponse` — the envelope for every `/api/v1` response
+### 6.1 `UnifiedResponse` — the response envelope
 
 `app/schemas/common.py` defines one generic model that wraps success **and** error
 bodies:
@@ -176,8 +177,14 @@ Each route also declares its error models (`responses={401: {"model":
 UnifiedResponse[None]}}` and so on) so the OpenAPI schema matches what the handlers
 actually emit.
 
-`/` and the unversioned `/health` are deliberately **not** enveloped: probes and
-`make status` consume them and should not have to unwrap anything.
+**Scope of the envelope.** Only the auth routes' **success** bodies are enveloped.
+`/`, `/health`, `/api/v1/health` and `/api/v1/health/db` keep exactly the bare bodies
+they return today — probes and `make status` consume them and should not have to
+unwrap anything. Error bodies are the one exception to that rule: FastAPI exception
+handlers are registered per app, not per route, so a probe that actually fails also
+answers with the envelope (`data: null`, real HTTP status). Keeping errors bare
+outside `/auth` would mean catching and re-raising inside every non-auth route — more
+code for a worse contract.
 
 ### 6.2 `/api/v1/auth` endpoints (tag `auth`)
 
@@ -259,11 +266,12 @@ and login go over HTTP, so `conftest.py` needs no changes:
 - register lowercases/strips the email
 - duplicate email → `409`; invalid email → `422`; 7-character password → `422`;
   73-byte password → `422`
-- **envelope shape**: every `/api/v1` response, success and error alike, has exactly
-  the keys `{status_code, message, data}`, and `status_code` equals the HTTP status
+- **envelope shape**: every `/api/v1/auth` success response has exactly the keys
+  `{status_code, message, data}`, and `status_code` equals the HTTP status
 - **error envelope**: a `401` and a `409` carry `data is None` with a specific
   `message`; a `422` carries the pydantic error list in `data`
-- **unversioned probes stay bare**: `/` and `/health` have none of the envelope keys
+- **non-auth routes stay bare**: `/`, `/health`, `/api/v1/health` and
+  `/api/v1/health/db` return their existing bodies with none of the envelope keys
 - login → `200` with both tokens in `data` and the right `expires_in`; two logins
   yield different refresh tokens
 - wrong password → `401`; unknown email → `401` with an identical `message`
@@ -281,9 +289,9 @@ and login go over HTTP, so `conftest.py` needs no changes:
 
 Updated tests:
 
-- `tests/test_health.py` — the `/api/v1/health` and `/api/v1/health/db` assertions
-  unwrap the envelope; `/health` stays an exact bare `{"status": "ok"}`; the OpenAPI
-  assertion becomes `/api/v1/auth/login`.
+- `tests/test_health.py` — the health assertions stay exactly as they are, which is
+  what pins the bare contract for non-auth routes; only the OpenAPI assertion changes
+  to `/api/v1/auth/login`.
 - `tests/test_migrations.py` — the `items` index/column assertions become
   `users`/`sessions` equivalents; a new test asserts `items` is gone after
   `upgrade head`; `downgrade base` is asserted to remove all three tables.
@@ -316,8 +324,10 @@ showing the envelope, plus one error-envelope example since clients must handle 
 - `make check` passes: `ruff check`, `ruff format --check`, full pytest suite.
 - `alembic check` reports no pending model/migration drift.
 - Every endpoint in §6.2 behaves as tabled, including every `401`/`409`/`422` case.
-- Every `/api/v1` response, success or error, is a `UnifiedResponse` carrying exactly
-  `status_code`, `message` and `data`; `/` and `/health` remain bare.
+- Every `/api/v1/auth` success is a `UnifiedResponse` with exactly `status_code`,
+  `message`, `data`, and every error response anywhere is a `UnifiedResponse` with
+  `data: null`; `/`, `/health`, `/api/v1/health` and `/api/v1/health/db` keep their
+  existing bare bodies.
 - No `Item`, `items`, or `crud` reference survives in `app/`, `tests/`, or the
   READMEs, apart from the migration that drops the `items` table.
 - The migration is reversible: `downgrade base` runs clean on a fresh database.
